@@ -1,0 +1,31 @@
+name = "bds-brain-mcp"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[ai]
+binding = "AI"
+
+[[vectorize]]
+binding = "BDS_INDEX"
+index_name = "bds-brain-index"
+
+[[d1_databases]]
+binding = "BDS_META"
+database_name = "bds-brain-meta"
+database_id = "c51a4d6d-9af2-49c9-8b4c-be7f03081308"
+
+[[kv_namespaces]]
+binding = "BDS_BRAIN_KV"
+id = "7ae556c724b247e28430d23278fd1dae"
+
+[[durable_objects.bindings]]
+name = "MCP_OBJECT"
+class_name = "BdsBrainMCP"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["BdsBrainMCP"]
+
+[observability]
+enabled = true

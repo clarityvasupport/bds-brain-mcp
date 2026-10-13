@@ -1,0 +1,26 @@
+{
+  "name": "bds-brain-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Personal RAG + file + image MCP server for Better DeepSeek",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "migrate": "wrangler d1 execute bds-brain-meta --file=./schema.sql --remote"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "agents": "^0.0.90",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "wrangler": "^4.149.0"
+  },
+  "allowScripts": {
+    "sharp@0.33.5": true,
+    "esbuild@0.28.2": true,
+    "workerd@1.20261006.1": true
+  }
+}
