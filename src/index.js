@@ -20,7 +20,8 @@ import {
   searchDocuments,
   getDocument,
   writeDocument,
-  listFolder
+  listFolder,
+  deleteDocument
 } from './tools/rag.js';
 import { generateImage, transformImage } from './tools/image.js';
 
@@ -92,6 +93,33 @@ export class BdsBrainMCP extends McpAgent {
         const t = Date.now();
         const envelope = await listFolder(this.env, args);
         return toMcpContent(envelope, 'list_folder', t);
+      }
+    );
+
+    this.server.tool(
+      'delete_document',
+      'Delete a document from storage and remove its vectors from the search index. Irreversible. Use list_folder first to confirm the path.',
+      {
+        path: z.string().describe('Full document path, e.g. "test/hello.md"')
+      },
+      async (args) => {
+        const t = Date.now();
+        const envelope = await deleteDocument(this.env, args);
+        return toMcpContent(envelope, 'delete_document', t);
+      }
+    );
+
+    this.server.tool(
+      '_test_image_block',
+      'TEMP PROBE: returns a native MCP image content block. Remove after test.',
+      {},
+      async () => {
+        const base64 =
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+        return {
+          content: [{ type: 'image', data: base64, mimeType: 'image/png' }],
+          isError: false
+        };
       }
     );
 

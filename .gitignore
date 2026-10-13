@@ -2,6 +2,7 @@ node_modules/
 .wrangler/
 .dev.vars
 .env
+wrangler.local.toml
 
 # Editor
 .vscode/

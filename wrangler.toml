@@ -13,11 +13,11 @@ index_name = "bds-brain-index"
 [[d1_databases]]
 binding = "BDS_META"
 database_name = "bds-brain-meta"
-database_id = "c51a4d6d-9af2-49c9-8b4c-be7f03081308"
+database_id = "PLACEHOLDER_SEE_README"
 
 [[kv_namespaces]]
 binding = "BDS_BRAIN_KV"
-id = "7ae556c724b247e28430d23278fd1dae"
+id = "PLACEHOLDER_SEE_README"
 
 [[durable_objects.bindings]]
 name = "MCP_OBJECT"

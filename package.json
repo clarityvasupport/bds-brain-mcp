@@ -6,7 +6,7 @@
   "description": "Personal RAG + file + image MCP server for Better DeepSeek",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --config wrangler.local.toml",
     "tail": "wrangler tail",
     "migrate": "wrangler d1 execute bds-brain-meta --file=./schema.sql --remote"
   },

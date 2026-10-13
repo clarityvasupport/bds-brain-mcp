@@ -2,7 +2,7 @@
 
 Your own MCP server — the "brain" in the BDS architecture. Built from scratch on Cloudflare Workers.
 
-**Six tools** across RAG, files, and image generation. Thin proxy over R2, Vectorize, D1, and Workers AI. Structured envelope on every response. Static API key auth.
+**Seven tools** across RAG, files, and image generation. Thin proxy over R2, Vectorize, D1, and Workers AI. Structured envelope on every response. Static API key auth.
 
 ---
 
@@ -29,6 +29,7 @@ BDS connects to one URL. The Worker exposes six tools. Every call returns a stru
 | `get_document` | Fetch a document by path |
 | `write_document` | Save + re-index (two-phase, reports partial success) |
 | `list_folder` | List documents under a prefix |
+| `delete_document` | Delete a document + its vectors (irreversible) |
 | `generate_image` | Text-to-image via Workers AI |
 | `transform_image` | Placeholder — needs Cloudflare Images (paid) |
 

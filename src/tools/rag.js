@@ -137,6 +137,63 @@ export async function writeDocument(env, { path, content }) {
   return ok({ path, phase });
 }
 
+export async function deleteDocument(env, { path }) {
+  if (!path || typeof path !== 'string') {
+    return err('VALIDATION', 'path is required and must be a string');
+  }
+
+  const phase = { lookup: null, vectors: null, storage: null };
+
+  // 1. Look up the doc to learn how many vectors to remove.
+  let row;
+  try {
+    row = await env.BDS_META.prepare(
+      'SELECT chunk_count FROM documents WHERE path = ?1'
+    ).bind(path).first();
+  } catch (e) {
+    return err(classifyError(e), `lookup failed: ${e.message || e}`, { path, phase: 'lookup' });
+  }
+
+  if (!row) {
+    return err('NOT_FOUND', `No document at path: ${path}`, { path });
+  }
+  phase.lookup = { ok: true, chunk_count: row.chunk_count || 0 };
+
+  // 2. Remove vectors. IDs are deterministic: sanitizedPath + "__" + index.
+  //    Tolerate stale chunk_count (a failed reindex leaves it at 0).
+  try {
+    const sanitized = path.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const n = Math.max(0, Number(row.chunk_count) || 0);
+    const ids = Array.from({ length: n }, (_, i) => `${sanitized}__${i}`);
+    if (ids.length > 0) {
+      for (let i = 0; i < ids.length; i += 100) {
+        await env.BDS_INDEX.deleteByIds(ids.slice(i, i + 100));
+      }
+    }
+    phase.vectors = { ok: true, deleted: ids.length };
+  } catch (e) {
+    // Vector cleanup is best-effort; still remove the D1 row so the doc
+    // disappears from list_folder / get_document.
+    phase.vectors = { ok: false, error: String(e.message || e) };
+  }
+
+  // 3. Remove the document row.
+  try {
+    await env.BDS_META.prepare(
+      'DELETE FROM documents WHERE path = ?1'
+    ).bind(path).run();
+    phase.storage = { ok: true };
+  } catch (e) {
+    return err(classifyError(e), `storage delete failed: ${e.message || e}`, { path, phase: 'storage' });
+  }
+
+  const clean = phase.vectors.ok;
+  return ok(
+    { path, phase },
+    clean ? {} : { note: 'document removed but some vectors may remain — re-run or purge manually' }
+  );
+}
+
 export async function listFolder(env, { prefix = '', limit = 100 }) {
   const n = Math.max(1, Math.min(1000, Number(limit) || 100));
   const likePattern = `${prefix}%`;
