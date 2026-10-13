@@ -109,25 +109,6 @@ export class BdsBrainMCP extends McpAgent {
       }
     );
 
-    this.server.tool(
-      '_test_image_block',
-      'TEMP PROBE: returns a markdown data-URI image. Remove after test.',
-      {},
-      async () => {
-        const base64 =
-          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `![test](data:image/png;base64,${base64})`
-            }
-          ],
-          isError: false
-        };
-      }
-    );
-
     /* ---- image --------------------------------------------------------- */
 
     this.server.tool(
@@ -207,22 +188,24 @@ export default {
       );
     }
 
-    /* ---- TEMP: D1 size test (remove after test) ------------------------ */
-    if (url.pathname === '/d1-test' && request.method === 'POST') {
+    /* ---- Public image serving (no auth — must be fetchable by renderer) */
+    if (url.pathname.startsWith('/image/') && request.method === 'GET') {
+      const id = url.pathname.slice('/image/'.length);
+      if (!id) return new Response('Missing id', { status: 400 });
       try {
-        const body = await request.text();
-        const bytes = body.length;
-        await env.BDS_META.prepare(
-          `INSERT INTO documents (path, content, size_bytes, chunk_count, indexed_at, updated_at)
-           VALUES (?1, ?2, ?3, 0, NULL, ?4)
-           ON CONFLICT(path) DO UPDATE SET
-             content    = excluded.content,
-             size_bytes = excluded.size_bytes,
-             updated_at = excluded.updated_at`
-        ).bind('healthcheck/d1-size-test.md', body, bytes, new Date().toISOString()).run();
-        return json({ ok: true, bytes_written: bytes });
+        const row = await env.BDS_META.prepare(
+          'SELECT base64, mime FROM images WHERE id = ?1'
+        ).bind(id).first();
+        if (!row) return new Response('Not found', { status: 404 });
+        const bytes = Uint8Array.from(atob(row.base64), (c) => c.charCodeAt(0));
+        return new Response(bytes, {
+          headers: {
+            'Content-Type': row.mime || 'image/png',
+            'Cache-Control': 'public, max-age=86400'
+          }
+        });
       } catch (e) {
-        return json({ ok: false, error: String(e.message || e) }, 500);
+        return new Response('Server error: ' + String(e.message || e), { status: 500 });
       }
     }
 

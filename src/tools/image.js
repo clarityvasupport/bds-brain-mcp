@@ -49,14 +49,24 @@ export async function generateImage(env, { prompt, model = 'flux', steps = 4 }) 
       });
     }
 
+    // The model's output format may differ from its label. Sniff the real
+    // bytes so the stored mime and served Content-Type are accurate.
+    mime = sniffMime(base64);
+
+    const id = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+    await env.BDS_META.prepare(
+      `INSERT INTO images (id, base64, mime, prompt, model, size_bytes, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+    ).bind(id, base64, mime, prompt, modelKey, base64.length, new Date().toISOString()).run();
+
     return ok({
       prompt,
       model: modelKey,
       model_id: modelId,
       mime,
       size_bytes: base64.length,
-      image_base64: base64,
-      hint: 'render_as: &lt;BDS:IMAGE src="data:{mime};base64,{image_base64}" />'
+      id,
+      url: `https://bds-brain-mcp.clarityva-support.workers.dev/image/${id}`
     });
   } catch (e) {
     return err(classifyError(e), String(e.message || e), { prompt, model: modelKey });
@@ -80,6 +90,19 @@ export async function transformImage(env, { url, ops }) {
 /* ------------------------------------------------------------------------ */
 /* helpers                                                                   */
 /* ------------------------------------------------------------------------ */
+
+/**
+ * Sniff the real image mime from a base64 string's magic bytes.
+ * The AI models return different formats than their names suggest —
+ * flux-schnell, for example, returns JPEG while we assumed PNG.
+ */
+function sniffMime(base64) {
+  if (base64.startsWith('/9j/')) return 'image/jpeg';
+  if (base64.startsWith('iVBORw0KGgo')) return 'image/png';
+  if (base64.startsWith('R0lGOD')) return 'image/gif';
+  if (base64.startsWith('UklGR')) return 'image/webp';
+  return 'application/octet-stream';
+}
 
 function uint8ToBase64(bytes) {
   let binary = '';
