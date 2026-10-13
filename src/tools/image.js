@@ -55,7 +55,8 @@ export async function generateImage(env, { prompt, model = 'flux', steps = 4 }) 
       model_id: modelId,
       mime,
       size_bytes: base64.length,
-      image_base64: base64
+      image_base64: base64,
+      hint: 'render_as: &lt;BDS:IMAGE src="data:{mime};base64,{image_base64}" />'
     });
   } catch (e) {
     return err(classifyError(e), String(e.message || e), { prompt, model: modelKey });

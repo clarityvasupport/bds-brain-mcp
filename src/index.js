@@ -111,13 +111,18 @@ export class BdsBrainMCP extends McpAgent {
 
     this.server.tool(
       '_test_image_block',
-      'TEMP PROBE: returns a native MCP image content block. Remove after test.',
+      'TEMP PROBE: returns a markdown data-URI image. Remove after test.',
       {},
       async () => {
         const base64 =
           'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
         return {
-          content: [{ type: 'image', data: base64, mimeType: 'image/png' }],
+          content: [
+            {
+              type: 'text',
+              text: `![test](data:image/png;base64,${base64})`
+            }
+          ],
           isError: false
         };
       }
@@ -200,6 +205,25 @@ export default {
           `Health check: ${url.origin}/health\n`,
         { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
       );
+    }
+
+    /* ---- TEMP: D1 size test (remove after test) ------------------------ */
+    if (url.pathname === '/d1-test' && request.method === 'POST') {
+      try {
+        const body = await request.text();
+        const bytes = body.length;
+        await env.BDS_META.prepare(
+          `INSERT INTO documents (path, content, size_bytes, chunk_count, indexed_at, updated_at)
+           VALUES (?1, ?2, ?3, 0, NULL, ?4)
+           ON CONFLICT(path) DO UPDATE SET
+             content    = excluded.content,
+             size_bytes = excluded.size_bytes,
+             updated_at = excluded.updated_at`
+        ).bind('healthcheck/d1-size-test.md', body, bytes, new Date().toISOString()).run();
+        return json({ ok: true, bytes_written: bytes });
+      } catch (e) {
+        return json({ ok: false, error: String(e.message || e) }, 500);
+      }
     }
 
     /* ---- MCP endpoint (auth required) ---------------------------------- */
