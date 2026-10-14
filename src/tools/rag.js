@@ -211,7 +211,7 @@ export async function renameDocument(env, { from, to, force = false }) {
   }
   phase.destination = { ok: true, existed: dstExists, chunks: dstChunks, force: !!force };
 
-  // 3. Write source content to the new path, delete the old row.
+  // 3. Write source content to the new path.
   const now = new Date().toISOString();
   try {
     await env.BDS_META.prepare(
@@ -234,9 +234,26 @@ export async function renameDocument(env, { from, to, force = false }) {
     const chunks = chunkText(content);
     const newCount = chunks.length;
 
+    // PATCH: debug log mirroring searchDocuments, so the tail shows embed state.
+    console.log('RENAME_EMBED_DEBUG', JSON.stringify({
+      from, to,
+      contentBytes: content.length,
+      chunkCount: newCount,
+      chunksIsArray: Array.isArray(chunks)
+    }));
+
     if (newCount > 0) {
       const embedRes = await env.AI.run(EMBED_MODEL, { text: chunks });
       const vectors = embedRes?.data || [];
+
+      // PATCH: log what the embed actually returned before we judge it.
+      console.log('RENAME_EMBED_RESULT', JSON.stringify({
+        from, to,
+        dataIsArray: Array.isArray(embedRes?.data),
+        vectorsLength: vectors.length,
+        expectedLength: chunks.length
+      }));
+
       if (vectors.length !== chunks.length) {
         throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
       }
@@ -260,15 +277,34 @@ export async function renameDocument(env, { from, to, force = false }) {
       for (let i = 0; i < stale.length; i += 100) {
         await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
       }
+      phase.purge = { ok: true, deleted: stale.length };
     }
 
     await env.BDS_META.prepare(
       'UPDATE documents SET chunk_count = ?1, indexed_at = ?2 WHERE path = ?3'
     ).bind(newCount, new Date().toISOString(), to).run();
   } catch (e) {
+    // PATCH: log the swallowed error so the tail captures it.
+    console.error('RENAME_REINDEX_FAILED', JSON.stringify({
+      from, to,
+      error: String(e && e.message ? e.message : e),
+      stack: String(e && e.stack ? e.stack : '')
+    }));
+
+    // PATCH: structured error instead of null (fix #3).
+    phase.reindex = { ok: false, error: String(e && e.message ? e.message : e) };
+
+    // PATCH: roll back the destination write so no ghost survives (fix #2).
+    try {
+      await env.BDS_META.prepare('DELETE FROM documents WHERE path = ?1').bind(to).run();
+      phase.rollback = { ok: true, removed: to };
+    } catch (re) {
+      phase.rollback = { ok: false, error: String(re.message || re) };
+    }
+
     return ok({
       partial: true, from, to, phase,
-      warning: 'destination saved but reindex failed — old path NOT removed'
+      warning: 'reindex failed — destination rolled back, old path NOT removed'
     }, { note: 'reindex failed' });
   }
 
