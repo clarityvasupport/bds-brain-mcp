@@ -105,6 +105,16 @@ export async function writeDocument(env, { path, content }) {
   }
 
   try {
+    // capture previous chunk_count BEFORE this write's chunk_count is stored,
+    // so a shrinking rewrite can purge its now-stale trailing vectors.
+    let prevCount = 0;
+    try {
+      const prev = await env.BDS_META.prepare(
+        'SELECT chunk_count FROM documents WHERE path = ?1'
+      ).bind(path).first();
+      prevCount = prev ? (prev.chunk_count || 0) : 0;
+    } catch (_) { prevCount = 0; }
+
     const chunks = chunkText(content);
     if (chunks.length === 0) {
       phase.reindex = { ok: true, chunks: 0, note: 'empty content' };
@@ -122,6 +132,20 @@ export async function writeDocument(env, { path, content }) {
       for (let i = 0; i < upserts.length; i += 100) {
         await env.BDS_INDEX.upsert(upserts.slice(i, i + 100));
       }
+
+      // purge trailing vectors left over when the doc shrank
+      const sanitized = path.replace(/[^a-zA-Z0-9._-]/g, '_');
+      if (chunks.length < prevCount) {
+        const stale = [];
+        for (let i = chunks.length; i < prevCount; i++) {
+          stale.push(`${sanitized}__${i}`);
+        }
+        for (let i = 0; i < stale.length; i += 100) {
+          await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
+        }
+        phase.purge = { ok: true, deleted: stale.length };
+      }
+
       phase.reindex = { ok: true, chunks: chunks.length };
     }
     await env.BDS_META.prepare(
@@ -135,6 +159,140 @@ export async function writeDocument(env, { path, content }) {
   }
 
   return ok({ path, phase });
+}
+
+export async function renameDocument(env, { from, to, force = false }) {
+  if (!from || typeof from !== 'string') {
+    return err('VALIDATION', 'from is required and must be a string');
+  }
+  if (!to || typeof to !== 'string') {
+    return err('VALIDATION', 'to is required and must be a string');
+  }
+  if (from === to) {
+    return err('VALIDATION', 'from and to are identical — nothing to do');
+  }
+
+  const phase = { source: null, destination: null, write: null, reindex: null, purge: null };
+
+  // 1. Read the source row.
+  let src;
+  try {
+    src = await env.BDS_META.prepare(
+      'SELECT content, size_bytes, chunk_count FROM documents WHERE path = ?1'
+    ).bind(from).first();
+  } catch (e) {
+    return err(classifyError(e), `source lookup failed: ${e.message || e}`, { from });
+  }
+  if (!src) {
+    return err('NOT_FOUND', `No document at path: ${from}`, { from });
+  }
+  const content = src.content || '';
+  const srcChunks = Math.max(0, Number(src.chunk_count) || 0);
+  phase.source = { ok: true, chunks: srcChunks, bytes: content.length };
+
+  // 2. Check the destination.
+  let dst;
+  try {
+    dst = await env.BDS_META.prepare(
+      'SELECT chunk_count FROM documents WHERE path = ?1'
+    ).bind(to).first();
+  } catch (e) {
+    return err(classifyError(e), `destination lookup failed: ${e.message || e}`, { to });
+  }
+  const dstExists = !!dst;
+  const dstChunks = dstExists ? Math.max(0, Number(dst.chunk_count) || 0) : 0;
+
+  if (dstExists && !force) {
+    return err(
+      'VALIDATION',
+      `Destination already exists: ${to}. Re-call with force=true to overwrite.`,
+      { from, to, destination_chunks: dstChunks }
+    );
+  }
+  phase.destination = { ok: true, existed: dstExists, chunks: dstChunks, force: !!force };
+
+  // 3. Write source content to the new path, delete the old row.
+  const now = new Date().toISOString();
+  try {
+    await env.BDS_META.prepare(
+      `INSERT INTO documents (path, content, size_bytes, chunk_count, indexed_at, updated_at)
+       VALUES (?1, ?2, ?3, 0, NULL, ?4)
+       ON CONFLICT(path) DO UPDATE SET
+         content    = excluded.content,
+         size_bytes = excluded.size_bytes,
+         updated_at = excluded.updated_at`
+    ).bind(to, content, content.length, now).run();
+    phase.write = { ok: true, bytes: content.length };
+  } catch (e) {
+    return err(classifyError(e), `destination write failed: ${e.message || e}`, { from, to, phase: 'write' });
+  }
+
+  // 4. Reindex under the NEW path's deterministic IDs.
+  const fromIds = [];
+  const toSanitized = to.replace(/[^a-zA-Z0-9._-]/g, '_');
+  try {
+    const chunks = chunkText(content);
+    const newCount = chunks.length;
+
+    if (newCount > 0) {
+      const embedRes = await env.AI.run(EMBED_MODEL, { text: chunks });
+      const vectors = embedRes?.data || [];
+      if (vectors.length !== chunks.length) {
+        throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
+      }
+      const upserts = chunks.map((text, i) => ({
+        id: `${toSanitized}__${i}`,
+        values: vectors[i],
+        metadata: { path: to, chunk_index: i, preview: text.slice(0, 240) }
+      }));
+      for (let i = 0; i < upserts.length; i += 100) {
+        await env.BDS_INDEX.upsert(upserts.slice(i, i + 100));
+      }
+    }
+    phase.reindex = { ok: true, chunks: newCount };
+
+    // 5. Purge the DESTINATION's old tail, if it was longer than the new content.
+    if (dstExists && newCount < dstChunks) {
+      const stale = [];
+      for (let i = newCount; i < dstChunks; i++) {
+        stale.push(`${toSanitized}__${i}`);
+      }
+      for (let i = 0; i < stale.length; i += 100) {
+        await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
+      }
+    }
+
+    await env.BDS_META.prepare(
+      'UPDATE documents SET chunk_count = ?1, indexed_at = ?2 WHERE path = ?3'
+    ).bind(newCount, new Date().toISOString(), to).run();
+  } catch (e) {
+    return ok({
+      partial: true, from, to, phase,
+      warning: 'destination saved but reindex failed — old path NOT removed'
+    }, { note: 'reindex failed' });
+  }
+
+  // 6. Delete the SOURCE's vectors, then the source row.
+  try {
+    const fromSanitized = from.replace(/[^a-zA-Z0-9._-]/g, '_');
+    for (let i = 0; i < srcChunks; i++) {
+      fromIds.push(`${fromSanitized}__${i}`);
+    }
+    for (let i = 0; i < fromIds.length; i += 100) {
+      await env.BDS_INDEX.deleteByIds(fromIds.slice(i, i + 100));
+    }
+    phase.purge = { ok: true, deleted: fromIds.length };
+  } catch (e) {
+    phase.purge = { ok: false, error: String(e.message || e) };
+  }
+
+  try {
+    await env.BDS_META.prepare('DELETE FROM documents WHERE path = ?1').bind(from).run();
+  } catch (e) {
+    return err(classifyError(e), `source delete failed: ${e.message || e}`, { from, to, phase });
+  }
+
+  return ok({ from, to, phase });
 }
 
 export async function deleteDocument(env, { path }) {

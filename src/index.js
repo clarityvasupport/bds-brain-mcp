@@ -21,9 +21,11 @@ import {
   getDocument,
   writeDocument,
   listFolder,
-  deleteDocument
+  deleteDocument,
+  renameDocument
 } from './tools/rag.js';
 import { generateImage, transformImage } from './tools/image.js';
+import { uploadDocument } from './tools/upload.js';
 
 /* ========================================================================== */
 /* MCP agent                                                                  */
@@ -82,6 +84,20 @@ export class BdsBrainMCP extends McpAgent {
     );
 
     this.server.tool(
+      'upload_document',
+      'Save a document from base64-encoded content and re-index it. Transport-safe: use this instead of write_document when the content contains markdown-significant characters (backticks, apostrophes, quotes, em-dashes). Single file per call. Two-phase: writes to storage, then re-indexes; reports partial success if the index step fails.',
+      {
+        path: z.string().describe('Where to save, e.g. "notes/idea.md"'),
+        content_b64: z.string().describe('The file content, base64-encoded (standard base64, UTF-8)')
+      },
+      async (args) => {
+        const t = Date.now();
+        const envelope = await uploadDocument(this.env, args);
+        return toMcpContent(envelope, 'upload_document', t);
+      }
+    );
+
+    this.server.tool(
       'list_folder',
       'List document paths under a prefix. Use an empty prefix to list everything.',
       {
@@ -106,6 +122,21 @@ export class BdsBrainMCP extends McpAgent {
         const t = Date.now();
         const envelope = await deleteDocument(this.env, args);
         return toMcpContent(envelope, 'delete_document', t);
+      }
+    );
+    
+    this.server.tool(
+      'rename_document',
+      'Rename or move a document by changing its path. Copies content to the new path, re-indexes under the new path, removes the old path and its vectors. Refuses if the destination exists unless force=true.',
+      {
+        from: z.string().describe('Current full path, e.g. "notes/old.md"'),
+        to: z.string().describe('New full path, e.g. "notes/new.md"'),
+        force: z.boolean().optional().describe('Overwrite destination if it exists (default false)')
+      },
+      async (args) => {
+        const t = Date.now();
+        const envelope = await renameDocument(this.env, args);
+        return toMcpContent(envelope, 'rename_document', t);
       }
     );
 
