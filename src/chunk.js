@@ -40,3 +40,39 @@ export function chunkText(text, size = DEFAULT_SIZE, overlap = DEFAULT_OVERLAP) 
 
   return chunks.filter((c) => c.length > 0);
 }
+
+/* ------------------------------------------------------------------------ */
+/* Vector ID construction                                                    */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Vectorize caps vector IDs at 64 bytes. The old scheme used the full
+ * sanitized path, which overflows for deep paths (moving a file to
+ * Projects/facility-prep/ pushed a 62-byte ID to 67 bytes → error 40008).
+ *
+ * Strategy: if the sanitized path + suffix fits in 64 bytes, use it as-is
+ * (preserves existing IDs for short paths). If not, truncate and append a
+ * stable base-36 hash of the FULL path so uniqueness is kept.
+ *
+ * FNV-1a — deterministic, synchronous, no crypto import needed.
+ */
+function fnv1a(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0);
+}
+
+export function vectorId(path, index) {
+  const sanitized = String(path).replace(/[^a-zA-Z0-9._-]/g, '_');
+  const suffix = `__${index}`;
+  const full = `${sanitized}${suffix}`;
+
+  if (full.length <= 64) return full;
+
+  const hash = fnv1a(sanitized).toString(36);
+  const head = sanitized.slice(0, 64 - suffix.length - hash.length - 1);
+  return `${head}_${hash}${suffix}`;
+}

@@ -13,7 +13,7 @@
  */
 
 import { ok, err, classifyError } from '../envelope.js';
-import { chunkText } from '../chunk.js';
+import { chunkText, vectorId } from '../chunk.js';
 
 const EMBED_MODEL = '@cf/baai/bge-base-en-v1.5';
 
@@ -90,7 +90,6 @@ export async function uploadDocument(env, { path, content_b64 }) {
   // --- reindex phase ---
   try {
     const chunks = chunkText(content);
-    const sanitized = path.replace(/[^a-zA-Z0-9._-]/g, '_');
     const newCount = chunks.length;
 
     if (newCount === 0) {
@@ -102,7 +101,7 @@ export async function uploadDocument(env, { path, content_b64 }) {
         throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
       }
       const upserts = chunks.map((text, i) => ({
-        id: `${sanitized}__${i}`,
+        id: vectorId(path, i),
         values: vectors[i],
         metadata: { path, chunk_index: i, preview: text.slice(0, 240) }
       }));
@@ -116,7 +115,7 @@ export async function uploadDocument(env, { path, content_b64 }) {
     if (newCount < prevCount) {
       const stale = [];
       for (let i = newCount; i < prevCount; i++) {
-        stale.push(`${sanitized}__${i}`);
+        stale.push(vectorId(path, i));
       }
       for (let i = 0; i < stale.length; i += 100) {
         await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));

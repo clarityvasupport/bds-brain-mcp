@@ -1,5 +1,5 @@
 import { ok, err, classifyError } from '../envelope.js';
-import { chunkText } from '../chunk.js';
+import { chunkText, vectorId } from '../chunk.js';
 
 const EMBED_MODEL = '@cf/baai/bge-base-en-v1.5';
 const MAX_DOC_BYTES = 64 * 1024;
@@ -125,7 +125,7 @@ export async function writeDocument(env, { path, content }) {
         throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
       }
       const upserts = chunks.map((text, i) => ({
-        id: `${path.replace(/[^a-zA-Z0-9._-]/g, '_')}__${i}`,
+        id: vectorId(path, i),
         values: vectors[i],
         metadata: { path, chunk_index: i, preview: text.slice(0, 240) }
       }));
@@ -134,11 +134,10 @@ export async function writeDocument(env, { path, content }) {
       }
 
       // purge trailing vectors left over when the doc shrank
-      const sanitized = path.replace(/[^a-zA-Z0-9._-]/g, '_');
       if (chunks.length < prevCount) {
         const stale = [];
         for (let i = chunks.length; i < prevCount; i++) {
-          stale.push(`${sanitized}__${i}`);
+          stale.push(vectorId(path, i));
         }
         for (let i = 0; i < stale.length; i += 100) {
           await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
@@ -229,7 +228,6 @@ export async function renameDocument(env, { from, to, force = false }) {
 
   // 4. Reindex under the NEW path's deterministic IDs.
   const fromIds = [];
-  const toSanitized = to.replace(/[^a-zA-Z0-9._-]/g, '_');
   try {
     const chunks = chunkText(content);
     const newCount = chunks.length;
@@ -258,7 +256,7 @@ export async function renameDocument(env, { from, to, force = false }) {
         throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
       }
       const upserts = chunks.map((text, i) => ({
-        id: `${toSanitized}__${i}`,
+        id: vectorId(to, i),
         values: vectors[i],
         metadata: { path: to, chunk_index: i, preview: text.slice(0, 240) }
       }));
@@ -272,7 +270,7 @@ export async function renameDocument(env, { from, to, force = false }) {
     if (dstExists && newCount < dstChunks) {
       const stale = [];
       for (let i = newCount; i < dstChunks; i++) {
-        stale.push(`${toSanitized}__${i}`);
+        stale.push(vectorId(to, i));
       }
       for (let i = 0; i < stale.length; i += 100) {
         await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
@@ -310,9 +308,8 @@ export async function renameDocument(env, { from, to, force = false }) {
 
   // 6. Delete the SOURCE's vectors, then the source row.
   try {
-    const fromSanitized = from.replace(/[^a-zA-Z0-9._-]/g, '_');
     for (let i = 0; i < srcChunks; i++) {
-      fromIds.push(`${fromSanitized}__${i}`);
+      fromIds.push(vectorId(from, i));
     }
     for (let i = 0; i < fromIds.length; i += 100) {
       await env.BDS_INDEX.deleteByIds(fromIds.slice(i, i + 100));
@@ -353,12 +350,11 @@ export async function deleteDocument(env, { path }) {
   }
   phase.lookup = { ok: true, chunk_count: row.chunk_count || 0 };
 
-  // 2. Remove vectors. IDs are deterministic: sanitizedPath + "__" + index.
+  // 2. Remove vectors. IDs are deterministic via vectorId().
   //    Tolerate stale chunk_count (a failed reindex leaves it at 0).
   try {
-    const sanitized = path.replace(/[^a-zA-Z0-9._-]/g, '_');
     const n = Math.max(0, Number(row.chunk_count) || 0);
-    const ids = Array.from({ length: n }, (_, i) => `${sanitized}__${i}`);
+    const ids = Array.from({ length: n }, (_, i) => vectorId(path, i));
     if (ids.length > 0) {
       for (let i = 0; i < ids.length; i += 100) {
         await env.BDS_INDEX.deleteByIds(ids.slice(i, i + 100));
