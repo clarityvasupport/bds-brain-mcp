@@ -13,7 +13,7 @@
  */
 
 import { ok, err, classifyError } from '../envelope.js';
-import { chunkText, vectorId } from '../chunk.js';
+import { persistDocument } from './rag.js';
 
 const EMBED_MODEL = '@cf/baai/bge-base-en-v1.5';
 
@@ -87,47 +87,11 @@ export async function uploadDocument(env, { path, content_b64 }) {
     return err(classifyError(e), `write phase failed: ${e.message || e}`, { path, phase: 'write' });
   }
 
-  // --- reindex phase ---
+  // --- reindex + purge via shared helper ---
   try {
-    const chunks = chunkText(content);
-    const newCount = chunks.length;
-
-    if (newCount === 0) {
-      phase.reindex = { ok: true, chunks: 0, note: 'empty content' };
-    } else {
-      const embedRes = await env.AI.run(EMBED_MODEL, { text: chunks });
-      const vectors = embedRes?.data || [];
-      if (vectors.length !== chunks.length) {
-        throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
-      }
-      const upserts = chunks.map((text, i) => ({
-        id: vectorId(path, i),
-        values: vectors[i],
-        metadata: { path, chunk_index: i, preview: text.slice(0, 240) }
-      }));
-      for (let i = 0; i < upserts.length; i += 100) {
-        await env.BDS_INDEX.upsert(upserts.slice(i, i + 100));
-      }
-      phase.reindex = { ok: true, chunks: newCount };
-    }
-
-    // --- purge phase: delete stale vectors beyond the new count ---
-    if (newCount < prevCount) {
-      const stale = [];
-      for (let i = newCount; i < prevCount; i++) {
-        stale.push(vectorId(path, i));
-      }
-      for (let i = 0; i < stale.length; i += 100) {
-        await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
-      }
-      phase.purge = { ok: true, deleted: stale.length };
-    } else {
-      phase.purge = { ok: true, deleted: 0 };
-    }
-
-    await env.BDS_META.prepare(
-      'UPDATE documents SET chunk_count = ?1, indexed_at = ?2 WHERE path = ?3'
-    ).bind(newCount || 0, new Date().toISOString(), path).run();
+    const p = await persistDocument(env, path, content, prevCount);
+    phase.reindex = p.reindex;
+    phase.purge = p.purge || { ok: true, deleted: 0 };
   } catch (e) {
     return ok({
       partial: true, path, phase,

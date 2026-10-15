@@ -4,6 +4,89 @@ import { chunkText, vectorId } from '../chunk.js';
 const EMBED_MODEL = '@cf/baai/bge-base-en-v1.5';
 const MAX_DOC_BYTES = 64 * 1024;
 
+/* ------------------------------------------------------------------------ */
+/* Shared helpers                                                            */
+/* ------------------------------------------------------------------------ */
+
+/** SHA-256 hex of a UTF-8 string. */
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/** Count non-overlapping occurrences of needle in haystack. */
+function countOccurrences(haystack, needle) {
+  let count = 0;
+  let pos = 0;
+  while (true) {
+    const idx = haystack.indexOf(needle, pos);
+    if (idx === -1) break;
+    count++;
+    pos = idx + needle.length;
+  }
+  return count;
+}
+
+/**
+ * Persist content: D1 write -> re-embed -> upsert -> purge stale tail.
+ * Shared by writeDocument, uploadDocument, and editDocument.
+ * Returns the phase record; throws on reindex failure.
+ */
+export async function persistDocument(env, path, content, prevCount) {
+  const phase = { write: null, reindex: null, purge: null };
+  const now = new Date().toISOString();
+
+  await env.BDS_META.prepare(
+    `INSERT INTO documents (path, content, size_bytes, chunk_count, indexed_at, updated_at)
+     VALUES (?1, ?2, ?3, 0, NULL, ?4)
+     ON CONFLICT(path) DO UPDATE SET
+       content    = excluded.content,
+       size_bytes = excluded.size_bytes,
+       updated_at = excluded.updated_at`
+  ).bind(path, content, content.length, now).run();
+  phase.write = { ok: true, bytes: content.length };
+
+  const chunks = chunkText(content);
+  const newCount = chunks.length;
+
+  if (newCount > 0) {
+    const embedRes = await env.AI.run(EMBED_MODEL, { text: chunks });
+    const vectors = embedRes?.data || [];
+    if (vectors.length !== chunks.length) {
+      throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
+    }
+    const upserts = chunks.map((text, i) => ({
+      id: vectorId(path, i),
+      values: vectors[i],
+      metadata: { path, chunk_index: i, preview: text.slice(0, 240) }
+    }));
+    for (let i = 0; i < upserts.length; i += 100) {
+      await env.BDS_INDEX.upsert(upserts.slice(i, i + 100));
+    }
+  }
+  phase.reindex = { ok: true, chunks: newCount };
+
+  if (newCount < prevCount) {
+    const stale = [];
+    for (let i = newCount; i < prevCount; i++) {
+      stale.push(vectorId(path, i));
+    }
+    for (let i = 0; i < stale.length; i += 100) {
+      await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
+    }
+    phase.purge = { ok: true, deleted: stale.length };
+  }
+
+  await env.BDS_META.prepare(
+    'UPDATE documents SET chunk_count = ?1, indexed_at = ?2 WHERE path = ?3'
+  ).bind(newCount, new Date().toISOString(), path).run();
+
+  return phase;
+}
+
 export async function searchDocuments(env, { query, top_k = 5 }) {
   if (!query || typeof query !== 'string') {
     return err('VALIDATION', 'query is required and must be a string');
@@ -65,12 +148,14 @@ export async function getDocument(env, { path }) {
     ).bind(path).first();
     if (!row) return err('NOT_FOUND', `No document at path: ${path}`, { path });
     const text = row.content || '';
+    const sha256 = await sha256Hex(text);
     const truncated = text.length > MAX_DOC_BYTES;
     return ok({
       path,
       size_bytes: row.size_bytes,
       chunk_count: row.chunk_count,
       updated_at: row.updated_at,
+      sha256,
       truncated,
       content: truncated ? text.slice(0, MAX_DOC_BYTES) : text,
       truncation_note: truncated ? `[…truncated at ${MAX_DOC_BYTES} bytes of ${text.length}]` : null
@@ -87,69 +172,22 @@ export async function writeDocument(env, { path, content }) {
   if (typeof content !== 'string') {
     return err('VALIDATION', 'content is required and must be a string');
   }
-  const phase = { write: null, reindex: null };
-  const now = new Date().toISOString();
+  const phase = { write: null, reindex: null, purge: null };
+
+  // capture prevCount BEFORE the write
+  let prevCount = 0;
+  try {
+    const prev = await env.BDS_META.prepare(
+      'SELECT chunk_count FROM documents WHERE path = ?1'
+    ).bind(path).first();
+    prevCount = prev ? (prev.chunk_count || 0) : 0;
+  } catch (_) { prevCount = 0; }
 
   try {
-    await env.BDS_META.prepare(
-      `INSERT INTO documents (path, content, size_bytes, chunk_count, indexed_at, updated_at)
-       VALUES (?1, ?2, ?3, 0, NULL, ?4)
-       ON CONFLICT(path) DO UPDATE SET
-         content    = excluded.content,
-         size_bytes = excluded.size_bytes,
-         updated_at = excluded.updated_at`
-    ).bind(path, content, content.length, now).run();
-    phase.write = { ok: true, bytes: content.length };
-  } catch (e) {
-    return err(classifyError(e), `write phase failed: ${e.message || e}`, { path, phase: 'write' });
-  }
-
-  try {
-    // capture previous chunk_count BEFORE this write's chunk_count is stored,
-    // so a shrinking rewrite can purge its now-stale trailing vectors.
-    let prevCount = 0;
-    try {
-      const prev = await env.BDS_META.prepare(
-        'SELECT chunk_count FROM documents WHERE path = ?1'
-      ).bind(path).first();
-      prevCount = prev ? (prev.chunk_count || 0) : 0;
-    } catch (_) { prevCount = 0; }
-
-    const chunks = chunkText(content);
-    if (chunks.length === 0) {
-      phase.reindex = { ok: true, chunks: 0, note: 'empty content' };
-    } else {
-      const embedRes = await env.AI.run(EMBED_MODEL, { text: chunks });
-      const vectors = embedRes?.data || [];
-      if (vectors.length !== chunks.length) {
-        throw new Error(`embedding count mismatch: got ${vectors.length}, expected ${chunks.length}`);
-      }
-      const upserts = chunks.map((text, i) => ({
-        id: vectorId(path, i),
-        values: vectors[i],
-        metadata: { path, chunk_index: i, preview: text.slice(0, 240) }
-      }));
-      for (let i = 0; i < upserts.length; i += 100) {
-        await env.BDS_INDEX.upsert(upserts.slice(i, i + 100));
-      }
-
-      // purge trailing vectors left over when the doc shrank
-      if (chunks.length < prevCount) {
-        const stale = [];
-        for (let i = chunks.length; i < prevCount; i++) {
-          stale.push(vectorId(path, i));
-        }
-        for (let i = 0; i < stale.length; i += 100) {
-          await env.BDS_INDEX.deleteByIds(stale.slice(i, i + 100));
-        }
-        phase.purge = { ok: true, deleted: stale.length };
-      }
-
-      phase.reindex = { ok: true, chunks: chunks.length };
-    }
-    await env.BDS_META.prepare(
-      'UPDATE documents SET chunk_count = ?1, indexed_at = ?2 WHERE path = ?3'
-    ).bind(phase.reindex.chunks || 0, new Date().toISOString(), path).run();
+    const p = await persistDocument(env, path, content, prevCount);
+    phase.write = p.write;
+    phase.reindex = p.reindex;
+    phase.purge = p.purge;
   } catch (e) {
     return ok({
       partial: true, path, phase,
@@ -158,6 +196,107 @@ export async function writeDocument(env, { path, content }) {
   }
 
   return ok({ path, phase });
+}
+
+/* ------------------------------------------------------------------------ */
+/* edit_document — surgical string replacement on an existing document       */
+/* ------------------------------------------------------------------------ */
+
+export async function editDocument(env, { path, old_str, new_str, count = 1 }) {
+  if (!path || typeof path !== 'string') {
+    return err('VALIDATION', 'path is required and must be a string');
+  }
+  if (typeof old_str !== 'string' || old_str.length === 0) {
+    return err('VALIDATION', 'old_str is required and must be a non-empty string');
+  }
+  if (typeof new_str !== 'string') {
+    return err('VALIDATION', 'new_str is required and must be a string');
+  }
+  if (old_str === new_str) {
+    return err('VALIDATION', 'old_str and new_str are identical — nothing to do');
+  }
+
+  const phase = { read: null, replace: null, write: null, reindex: null, purge: null };
+
+  // 1. read current content
+  let row;
+  try {
+    row = await env.BDS_META.prepare(
+      'SELECT content, size_bytes, chunk_count FROM documents WHERE path = ?1'
+    ).bind(path).first();
+  } catch (e) {
+    return err(classifyError(e), `read failed: ${e.message || e}`, { path });
+  }
+  if (!row) return err('NOT_FOUND', `No document at path: ${path}`, { path });
+
+  const before = row.content || '';
+  const prevCount = Math.max(0, Number(row.chunk_count) || 0);
+  const sha_before = await sha256Hex(before);
+  phase.read = { ok: true, bytes: before.length, sha256: sha_before };
+
+  // 2. count occurrences BEFORE any write
+  const occurrences = countOccurrences(before, old_str);
+
+  if (occurrences === 0) {
+    return err('VALIDATION', `old_str not found in ${path}`, {
+      path, occurrences: 0, sha256_before: sha_before
+    });
+  }
+
+  const expected = count === 'all' ? occurrences : Number(count);
+  if (!Number.isFinite(expected) || expected < 1) {
+    return err('VALIDATION', `invalid count: ${JSON.stringify(count)}`, { path, occurrences });
+  }
+  if (occurrences !== expected) {
+    return err(
+      'VALIDATION',
+      `old_str occurs ${occurrences} time(s), expected ${expected}. ` +
+      `Pass count=${occurrences} or count="all" to proceed.`,
+      { path, occurrences, expected, sha256_before: sha_before }
+    );
+  }
+
+  // 3. apply
+  const after = count === 'all'
+    ? before.split(old_str).join(new_str)
+    : before.replace(old_str, new_str);
+
+  const sha_after = await sha256Hex(after);
+  phase.replace = { ok: true, occurrences: expected };
+
+  if (after === before) {
+    return ok({
+      path, changed: false,
+      occurrences: expected,
+      sha256_before: sha_before,
+      sha256_after: sha_after,
+      phase
+    });
+  }
+
+  // 4. persist
+  try {
+    const p = await persistDocument(env, path, after, prevCount);
+    phase.write = p.write;
+    phase.reindex = p.reindex;
+    phase.purge = p.purge;
+  } catch (e) {
+    return ok({
+      partial: true, path, phase,
+      warning: 'edit computed but persist failed — storage may be stale'
+    }, { note: 'persist failed' });
+  }
+
+  return ok({
+    path,
+    changed: true,
+    occurrences: expected,
+    bytes_before: before.length,
+    bytes_after: after.length,
+    sha256_before: sha_before,
+    sha256_after: sha_after,
+    phase
+  });
 }
 
 export async function renameDocument(env, { from, to, force = false }) {

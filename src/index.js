@@ -20,6 +20,7 @@ import {
   searchDocuments,
   getDocument,
   writeDocument,
+  editDocument,
   listFolder,
   deleteDocument,
   renameDocument
@@ -80,6 +81,25 @@ export class BdsBrainMCP extends McpAgent {
         const t = Date.now();
         const envelope = await writeDocument(this.env, args);
         return toMcpContent(envelope, 'write_document', t);
+      }
+    );
+
+    this.server.tool(
+      'edit_document',
+      'Edit an existing document by exact string replacement. Reads current content server-side, replaces old_str with new_str, re-indexes. The caller never supplies the full content. Refuses unless old_str occurs exactly `count` times (default 1). Returns SHA-256 of content before and after.',
+      {
+        path: z.string().describe('Full document path, e.g. "Agents/Agents.md"'),
+        old_str: z.string().min(1)
+          .describe('Exact substring to replace; must occur exactly `count` times'),
+        new_str: z.string()
+          .describe('Replacement string'),
+        count: z.union([z.number().int().min(1), z.literal('all')]).optional()
+          .describe('Required occurrence count. Default 1. Use "all" to replace every occurrence.')
+      },
+      async (args) => {
+        const t = Date.now();
+        const envelope = await editDocument(this.env, args);
+        return toMcpContent(envelope, 'edit_document', t);
       }
     );
 
