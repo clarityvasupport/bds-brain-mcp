@@ -59,6 +59,8 @@ export async function generateImage(env, { prompt, model = 'flux', steps = 4 }) 
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
     ).bind(id, base64, mime, prompt, modelKey, base64.length, new Date().toISOString()).run();
 
+    const baseUrl = (env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
+
     return ok({
       prompt,
       model: modelKey,
@@ -66,7 +68,7 @@ export async function generateImage(env, { prompt, model = 'flux', steps = 4 }) 
       mime,
       size_bytes: base64.length,
       id,
-      url: `https://bds-brain-mcp.clarityva-support.workers.dev/image/${id}`
+      url: `${baseUrl}/image/${id}`
     });
   } catch (e) {
     return err(classifyError(e), String(e.message || e), { prompt, model: modelKey });

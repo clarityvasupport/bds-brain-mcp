@@ -3,6 +3,11 @@ main = "src/index.js"
 compatibility_date = "2026-10-01"
 compatibility_flags = ["nodejs_compat"]
 
+[vars]
+# Public origin where this Worker is reachable. Used by generate_image
+# to build absolute image URLs. Change this for your own fork.
+PUBLIC_BASE_URL = "https://bds-brain-mcp.clarityva-support.workers.dev"
+
 [ai]
 binding = "AI"
 
