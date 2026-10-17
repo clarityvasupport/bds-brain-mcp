@@ -2,36 +2,63 @@
 
 Your own MCP server — the "brain" in the BDS architecture. Built from scratch on Cloudflare Workers.
 
-**Seven tools** across RAG, files, and image generation. Thin proxy over R2, Vectorize, D1, and Workers AI. Structured envelope on every response. Static API key auth.
+**Ten tools** across RAG, file management, and image generation. Thin proxy over D1, Vectorize, and Workers AI. Structured envelope on every response. Static API key auth. Fork-friendly — see below to deploy your own.
 
 ---
 
 ## Architecture
 
 ```
-
-BDS (browser)  →  bds-brain-mcp (Worker)  →  R2        (documents)
-→  Vectorize (embeddings)
-→  D1        (metadata)
-→  Workers AI (models)
-
+BDS (browser)  →  bds-brain-mcp (Worker)  →  D1         (documents + metadata + images)
+                                          →  Vectorize  (embeddings)
+                                          →  Workers AI (embeddings + image models)
+                                          →  KV         (bound; reserved, unused by current tools)
 ```
 
-BDS connects to one URL. The Worker exposes six tools. Every call returns a structured envelope with status, error code, and retriability.
+BDS connects to one URL. The Worker exposes ten tools. Every call returns a structured envelope with status, error code, and retriability.
 
 ---
 
-## The six tools
+## Using this as a template
+
+This repo is meant to be forked. Fork it, wire it to your own Cloudflare account, and you have your own Brain.
+
+### What to change after forking
+
+- **`wrangler.local.toml`** — fill in `database_id` (D1) and `id` (KV) from your own `wrangler d1 create` and `wrangler kv namespace create` runs. This file is gitignored; never commit it.
+- **`.dev.vars`** — set your own `API_KEY`. Copy from `.dev.vars.example` first. Also gitignored.
+- **`PUBLIC_BASE_URL`** in `wrangler.toml` — the public origin of your Worker. Used by `generate_image` to build absolute image URLs. Set it to your own Worker URL after first deploy.
+
+### What to leave alone
+
+- **Tool names and argument schemas.** Better DeepSeek and any existing clients call them by exact name.
+- **The response envelope.** BDS parses the `status` / `data` / `meta` / `error` shape.
+- **`schema.sql`.** The D1 migration is written against an empty database. If you need to change the schema, add a new migration file rather than editing this one.
+
+### Inherited rough edges
+
+- The Worker logs **all** incoming request headers to stdout, including `Authorization`. See the Security note below before exposing your fork publicly.
+- `transform_image` is a placeholder that returns an error.
+- `schema-v2.sql` is currently identical to `schema.sql`.
+
+---
+
+## The ten tools
 
 | Tool | Purpose |
 |---|---|
 | `search_documents` | Semantic search across indexed documents |
-| `get_document` | Fetch a document by path |
-| `write_document` | Save + re-index (two-phase, reports partial success) |
+| `get_document` | Fetch a document by path (truncated at 64 KB) |
+| `write_document` | Save + re-index (raw text; two-phase, reports partial success) |
+| `edit_document` | Surgical exact-string replacement on an existing doc; returns SHA-256 before/after |
+| `upload_document` | Save from base64 — transport-safe for markdown-heavy content (two-phase) |
 | `list_folder` | List documents under a prefix |
 | `delete_document` | Delete a document + its vectors (irreversible) |
-| `generate_image` | Text-to-image via Workers AI |
+| `rename_document` | Move/rename a doc: re-index under the new path, remove old path and vectors |
+| `generate_image` | Text-to-image via Workers AI (flux, sdxl, dreamshaper) |
 | `transform_image` | Placeholder — needs Cloudflare Images (paid) |
+
+Documents live in D1 as text. There is no R2 binding. Vectorize holds only the embeddings; D1 is the source of truth for content and metadata.
 
 ---
 
@@ -39,8 +66,8 @@ BDS connects to one URL. The Worker exposes six tools. Every call returns a stru
 
 ### Prerequisites
 
-- Cloudflare account (free tier is enough for v1)
-- Node.js 18+
+- Cloudflare account (free tier is enough)
+- **Node.js 22+** (wrangler 4.149 requires Node 22)
 - `wrangler` CLI (installed locally via `npm install`)
 
 ### 1. Install
@@ -51,92 +78,88 @@ npm install
 
 ### 2. Log in to Cloudflare
 
-```
+```bash
 npx wrangler login
 ```
 
 ### 3. Create the resources
 
-**R2 bucket** (document storage):
+**D1 database** (documents, metadata, images):
 
-```
-npx wrangler r2 bucket create bds-brain-docs
+```bash
+npx wrangler d1 create bds-brain-meta
 ```
 
 **Vectorize index** (embedding search). The `bge-base-en-v1.5` model produces 768-dimensional vectors, so the index must match:
 
-```
+```bash
 npx wrangler vectorize create bds-brain-index --dimensions=768 --metric=cosine
 ```
 
-**D1 database** (metadata, job logs):
+**KV namespace** (bound in `wrangler.toml`; reserved for future use — no current tool reads it):
 
-```
-npx wrangler d1 create bds-brain-meta
-```
-
-Copy the `database_id` it prints into `wrangler.toml`.
-
-**KV namespace** (job logs, small cache):
-
-```
+```bash
 npx wrangler kv namespace create BDS_BRAIN_KV
 ```
 
-Copy the `id` into `wrangler.toml`.
+### 4. Create `wrangler.local.toml`
 
-### 4. Set the API key
+The committed `wrangler.toml` ships with placeholder IDs and is the template, not the deploy config. The `package.json` scripts run against `wrangler.local.toml`, which is gitignored.
 
-Edit `.dev.vars` (created from `.dev.vars.example`):
-
-```
-API_KEY=your-long-random-string-here
+```bash
+cp wrangler.toml wrangler.local.toml
 ```
 
-Generate something long and random. This is the only secret protecting your server.
+Then edit `wrangler.local.toml` and paste in:
+- `database_id` from the `d1 create` output
+- `id` from the `kv namespace create` output
+
+### 5. Set the API key
+
+For local dev, copy the example and fill it in:
+
+```bash
+cp .dev.vars.example .dev.vars
+```
+
+Then open `.dev.vars` and set `API_KEY` to a long random string. This is the only secret protecting your server.
 
 **For production**, set it as a Worker secret instead of a file:
 
-```
-npx wrangler secret put API_KEY
-```
-
-### 5. Run the D1 migration
-
-```
-npx wrangler d1 execute bds-brain-meta --file=./schema.sql
+```bash
+npx wrangler secret put API_KEY --config wrangler.local.toml
 ```
 
-### 6. Deploy
+### 6. Run the D1 migration
 
+```bash
+npm run migrate
 ```
+
+This applies `schema.sql` to the remote D1 database. For a local-only run, drop `--remote` from the script or run it manually:
+
+```bash
+npx wrangler d1 execute bds-brain-meta --file=./schema.sql --local --config wrangler.local.toml
+```
+
+### 7. Deploy
+
+```bash
 npm run deploy
 ```
 
 Wrangler prints your URL:
 
 ```
-https://bds-brain-mcp.your-subdomain.workers.dev
+https://bds-brain-mcp.<your-subdomain>.workers.dev
 ```
 
-### 7. Wire into BDS
+### 8. Wire into BDS
 
 1. Open the BDS drawer → **Settings → MCP Servers**
-2. **URL:** `https://bds-brain-mcp.your-subdomain.workers.dev/mcp`
+2. **URL:** `https://bds-brain-mcp.<your-subdomain>.workers.dev/mcp`
 3. **API key:** the value you set as `API_KEY`
-4. Click **Test** — you should see all six tools listed
-
----
-
-## Verifying what BDS sends
-
-The Worker logs every incoming request's headers to stdout. To watch live:
-
-```
-npm run tail
-```
-
-Then click **Test** in BDS. The output shows the exact headers BDS sends — including `authorization`, `accept`, and any custom headers. That's how you confirm the auth format and settle the "SSE vs. plain JSON" question empirically.
+4. Click **Test** — you should see all ten tools listed
 
 ---
 
@@ -144,10 +167,10 @@ Then click **Test** in BDS. The output shows the exact headers BDS sends — inc
 
 Every tool returns the same shape:
 
-```
+```json
 {
   "status": "ok",
-  "data": { ... },
+  "data": { },
   "meta": {
     "tool": "search_documents",
     "duration_ms": 142
@@ -157,20 +180,22 @@ Every tool returns the same shape:
 
 Or on failure:
 
-```
+```json
 {
   "status": "error",
   "error": {
     "code": "UPSTREAM",
     "message": "Vectorize query rejected: dimension mismatch (expected 768, got 1536)",
     "retriable": true,
-    "details": { ... }
+    "details": { }
   },
   "meta": { "tool": "search_documents", "attempt": 1, "duration_ms": 88 }
 }
 ```
 
 Error codes: `TIMEOUT`, `NETWORK`, `RATE_LIMIT`, `UPSTREAM`, `INTERNAL` (retriable); `VALIDATION`, `NOT_FOUND`, `FORBIDDEN` (terminal).
+
+Two-phase writes (`write_document`, `upload_document`, `edit_document`, `rename_document`) can return `"partial": true` when the storage write succeeded but the search-index update failed. The `phase` object shows which step failed.
 
 ---
 
@@ -180,34 +205,49 @@ Error codes: `TIMEOUT`, `NETWORK`, `RATE_LIMIT`, `UPSTREAM`, `INTERNAL` (retriab
 .
 ├── README.md
 ├── package.json
-├── wrangler.toml
-├── schema.sql
-├── .dev.vars.example
+├── package-lock.json
+├── wrangler.toml          template; placeholders for IDs
+├── schema.sql             D1 schema (documents, jobs, images)
+├── schema-v2.sql          (currently identical to schema.sql)
+├── .dev.vars.example      template for local secrets; copy to .dev.vars
 ├── .gitignore
 └── src/
-    ├── index.js         Worker entry + McpAgent class
-    ├── auth.js          API key check
-    ├── envelope.js      ok() / err() helpers
-    ├── chunk.js         text chunking for indexing
+    ├── index.js           Worker entry + McpAgent class
+    ├── auth.js            API key check
+    ├── envelope.js        ok() / err() / classifyError() helpers
+    ├── chunk.js           text chunking + deterministic vector IDs
     └── tools/
-        ├── rag.js       search_documents, get_document,
-        │                write_document, list_folder
-        └── image.js     generate_image, transform_image
+        ├── rag.js         search/get/write/edit/list/delete/rename
+        ├── upload.js      upload_document (base64 ingest)
+        └── image.js       generate_image, transform_image
 ```
+
+---
+
+## Security note on request logging
+
+Earlier versions of this README suggested running `npm run tail` to inspect incoming headers. The Worker currently logs **all** request headers to stdout, including `authorization` and `x-api-key`. That means:
+
+- **Do not** run `npm run tail` and share the output publicly.
+- If you have already shared a tail log, **rotate the API key** (`npx wrangler secret put API_KEY`).
+
+A future change should allowlist diagnostic headers before logging. Until then, treat tail output as secret material.
 
 ---
 
 ## Troubleshooting
 
-**`Test` fails in BDS** → run `npm run tail` in a terminal. The Worker logs every request. If headers arrive, the request got through and the failure is in the response shape.
+**`Test` fails in BDS** → confirm the URL ends in `/mcp`, the API key matches `API_KEY` exactly, and the request actually reaches the Worker. (Do not paste tail output into a public channel — see the security note above.)
 
-**Auth rejected** → confirm the API key in BDS matches `API_KEY` exactly. The Worker accepts it as `Authorization: Bearer <key>` or `X-API-Key: <key>`.
+**Auth rejected** → the Worker accepts the key as `Authorization: Bearer <key>` or `X-API-Key: <key>`. Confirm the value in BDS matches `API_KEY` exactly.
 
 **Vectorize dimension mismatch** → the index must be created with `--dimensions=768` to match the embedding model. Delete and recreate if wrong.
 
-**Durable Object errors on deploy** → the free tier supports SQLite-backed DOs. If it complains, ensure the `[[migrations]]` block in `wrangler.toml` is present and unmodified.
+**Durable Object errors on deploy** → the free tier supports SQLite-backed DOs. Ensure the `[[migrations]]` block in `wrangler.toml` is present and unmodified.
 
 **`agents/mcp` import error** → run `npm install agents@latest`. The package evolves; if the API surface has changed, the error message names the missing export.
+
+**`npm run dev` says config file not found** → you skipped step 4. Create `wrangler.local.toml` from `wrangler.toml` and fill in the IDs.
 
 ---
 
@@ -216,31 +256,3 @@ Error codes: `TIMEOUT`, `NETWORK`, `RATE_LIMIT`, `UPSTREAM`, `INTERNAL` (retriab
 - **Not a fork** of the GitHub MCP server. Different purpose, no GitHub tools.
 - **Not multi-tenant.** One API key, one user. Good enough for personal use.
 - **Not vector-perfect.** Chunking is character-based. Swap in something smarter when it matters.
-
-</BDS:create_file>
-
-<BDS:create_file fileName="package.json">
-
-```json
-{
-  "name": "bds-brain-mcp",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "description": "Personal RAG + file + image MCP server for Better DeepSeek",
-  "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail",
-    "migrate": "wrangler d1 execute bds-brain-meta --file=./schema.sql"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "agents": "^0.0.90",
-    "zod": "^3.23.8"
-  },
-  "devDependencies": {
-    "wrangler": "^3.80.0"
-  }
-}
-
