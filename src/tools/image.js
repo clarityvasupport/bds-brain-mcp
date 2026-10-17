@@ -36,6 +36,23 @@ export async function generateImage(env, { prompt, model = 'flux', steps = 4 }) 
 
     if (output instanceof Uint8Array) {
       base64 = uint8ToBase64(output);
+    } else if (output instanceof ReadableStream) {
+      const reader = output.getReader();
+      const chunks = [];
+      let done = false;
+      while (!done) {
+        const { value, done: readerDone } = await reader.read();
+        if (value) chunks.push(value);
+        done = readerDone;
+      }
+      const totalLength = chunks.reduce((acc, val) => acc + val.length, 0);
+      const merged = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      base64 = uint8ToBase64(merged);
     } else if (output && output.image) {
       base64 = output.image;
     } else if (typeof output === 'string') {
