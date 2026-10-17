@@ -39,7 +39,6 @@ This repo is meant to be forked. Fork it, wire it to your own Cloudflare account
 
 - The Worker logs **all** incoming request headers to stdout, including `Authorization`. See the Security note below before exposing your fork publicly.
 - `transform_image` is a placeholder that returns an error.
-- `schema-v2.sql` is currently identical to `schema.sql`.
 
 ---
 
@@ -208,7 +207,6 @@ Two-phase writes (`write_document`, `upload_document`, `edit_document`, `rename_
 ├── package-lock.json
 ├── wrangler.toml          template; placeholders for IDs
 ├── schema.sql             D1 schema (documents, jobs, images)
-├── schema-v2.sql          (currently identical to schema.sql)
 ├── .dev.vars.example      template for local secrets; copy to .dev.vars
 ├── .gitignore
 └── src/
